@@ -45,8 +45,11 @@
 #include <ros/node_handle.h>
 #include <hardware_interface/joint_command_interface.h>
 #include <controller_interface/controller.h>
+#include <std_msgs/Bool.h>
 #include <std_msgs/Float64MultiArray.h>
+#include <std_srvs/Trigger.h>
 #include <realtime_tools/realtime_buffer.h>
+#include <realtime_tools/realtime_publisher.h>
 
 
 namespace forward_command_controller
@@ -107,6 +110,12 @@ public:
     commands_buffer_.writeFromNonRT(std::vector<double>(n_joints_, 0.0));
 
     sub_command_ = n.subscribe<std_msgs::Float64MultiArray>("command", 1, &ForwardJointGroupCommandController::commandCB, this);
+
+    freeze_robot_ = n.advertiseService("freeze_robot", &ForwardJointGroupCommandController::freezeCB, this);
+    unfreeze_robot_ = n.advertiseService("unfreeze_robot", &ForwardJointGroupCommandController::unfreezeCB, this);
+    freeze_active_ = false;
+    freeze_status_pub_.reset(new realtime_tools::RealtimePublisher<std_msgs::Bool>(n, "freeze_status", 10));
+
     return true;
   }
 
@@ -116,6 +125,12 @@ public:
     std::vector<double> & commands = *commands_buffer_.readFromRT();
     for(unsigned int i=0; i<n_joints_; i++)
     {  joints_[i].setCommand(commands[i]);  }
+
+    if (freeze_status_pub_ && freeze_status_pub_->trylock())
+    {
+      freeze_status_pub_->msg_.data = freeze_active_;
+      freeze_status_pub_->unlockAndPublish();
+    }
   }
 
   std::vector< std::string > joint_names_;
@@ -132,8 +147,32 @@ private:
       ROS_ERROR_STREAM("Dimension of command (" << msg->data.size() << ") does not match number of joints (" << n_joints_ << ")! Not executing!");
       return; 
     }
-    commands_buffer_.writeFromNonRT(msg->data);
+    if (!freeze_active_) commands_buffer_.writeFromNonRT(msg->data);
   }
+
+  ros::ServiceServer freeze_robot_;
+  ros::ServiceServer unfreeze_robot_;
+  bool freeze_active_;
+  bool freezeCB(std_srvs::Trigger::Request &req, std_srvs::Trigger::Response &resp)
+  {
+      ROS_INFO_STREAM("Freeze robot");
+      if (freeze_active_) resp.message = "Robot already frozen.";
+      else resp.message = "Motion execution stopped - robot frozen.";
+      freeze_active_ = true;
+      resp.success = true;
+      return true;
+  }
+  bool unfreezeCB(std_srvs::Trigger::Request &req, std_srvs::Trigger::Response &resp)
+  {
+      ROS_INFO_STREAM("Un-Freeze robot");
+      if (!freeze_active_) resp.message = "Robot already active.";
+      else resp.message = "Robot ready to execute.";
+      freeze_active_ = false;
+      resp.success = true;
+      return true;
+  }
+  /// Publish current freeze status
+  boost::shared_ptr<realtime_tools::RealtimePublisher<std_msgs::Bool> > freeze_status_pub_;
 };
 
 }
